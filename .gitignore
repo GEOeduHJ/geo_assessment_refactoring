@@ -88,3 +88,4 @@ ehthumbs.db
 Thumbs.db
 
 # personal files
+git branch -M main

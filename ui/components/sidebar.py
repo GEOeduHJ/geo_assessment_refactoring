@@ -3,7 +3,7 @@ Sidebar component for the RAG grading platform.
 Handles LLM model selection, file uploads, and document processing.
 """
 import streamlit as st
-from typing import Optional
+from typing import Literal, Optional
 from ui.state_manager import StateManager
 from services.file_service import FileService
 from models.llm_manager import LLMManager
@@ -44,10 +44,11 @@ class SidebarComponent:
         # Model Selection based on Provider
         llm_model = ""
         if llm_provider == "GROQ":
-            llm_model = st.selectbox(
+            llm_model: Literal['llama-3.3-70b-versatile', 'llama-3.1-8b-instant', 'openai/gpt-oss-120b', 'openai/gpt-oss-20b', 'qwen/qwen3-32b', 'meta-llama/llama-guard-4-12b'] = st.selectbox(
                 "GROQ 모델 선택", 
-                ("meta-llama/llama-guard-4-12b", "meta-llama/llama-4-maverick-17b-128e-instruct", 
-                 "openai/gpt-oss-120b", "qwen/qwen3-32b")
+                ("llama-3.3-70b-versatile", "llama-3.1-8b-instant", 
+                 "openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3-32b",
+                 "meta-llama/llama-guard-4-12b")
             )
         elif llm_provider == "OpenAI":
             llm_model = st.selectbox("OpenAI 모델 선택", ("gpt-5",))

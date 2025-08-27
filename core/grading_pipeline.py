@@ -77,14 +77,14 @@ class GradingPipeline:
             )
             
             # Step 6: Call LLM for grading
-            llm = self.llm_manager.get_llm("GROQ", "meta-llama/llama-guard-4-12b")  # Use default model
+            llm = self.llm_manager.get_llm("GROQ", "llama-3.3-70b-versatile")  # Use generation model (not guard model)
             llm_response_str = self.llm_manager.call_llm_with_retry(llm, grading_prompt)
             
             if not llm_response_str:
                 return {"이름": student_name, "오류": "LLM 응답을 받지 못했습니다."}
             
-            # Step 7: Parse LLM response using enhanced parser
-            parsing_result = self.enhanced_parser.parse_response(llm_response_str, parser)
+            # Step 7: Parse LLM response using enhanced parser with adaptive validation
+            parsing_result = self.enhanced_parser.parse_response_with_rubric(llm_response_str, parser, rubric)
             
             # Step 8: Handle parsing results based on success level
             if parsing_result.success_level == SuccessLevel.FULL:

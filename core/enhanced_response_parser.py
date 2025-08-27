@@ -7,7 +7,8 @@ strategies, validation, and error recovery to robustly handle LLM responses.
 
 import time
 import logging
-from typing import Optional, List
+import re
+from typing import Optional, List, Dict, Any
 from langchain_core.output_parsers import PydanticOutputParser
 
 from .parsing_models import (
@@ -50,6 +51,25 @@ class EnhancedResponseParser:
             logging.basicConfig(level=logging.INFO)
     
     def parse_response(self, response: str, parser: PydanticOutputParser) -> ParsingResult:
+        """Parse LLM response using multiple strategies with validation and recovery."""
+        return self._parse_response_internal(response, parser, None)
+    
+    def parse_response_with_rubric(self, response: str, parser: PydanticOutputParser, 
+                                  rubric: List[Dict[str, Any]]) -> ParsingResult:
+        """Parse LLM response with adaptive validation based on rubric structure.
+        
+        Args:
+            response: Raw LLM response string
+            parser: Pydantic output parser for validation
+            rubric: Rubric items for adaptive schema creation
+            
+        Returns:
+            ParsingResult with parsing outcome and details
+        """
+        return self._parse_response_internal(response, parser, rubric)
+    
+    def _parse_response_internal(self, response: str, parser: PydanticOutputParser, 
+                               rubric: Optional[List[Dict[str, Any]]] = None) -> ParsingResult:
         """
         Parse LLM response using multiple strategies with validation and recovery.
         
@@ -63,8 +83,12 @@ class EnhancedResponseParser:
         start_time = time.time()
         
         try:
-            # Create extraction context
-            context = self._create_extraction_context(response)
+            # Pre-process the response to clean LLM artifacts
+            cleaned_response = self._preprocess_response(response)
+            logger.debug(f"Response preprocessing: {len(response)} -> {len(cleaned_response)} chars")
+            
+            # Create extraction context with cleaned response
+            context = self._create_extraction_context(cleaned_response)
             
             # Initialize result
             result = ParsingResult(
@@ -76,14 +100,21 @@ class EnhancedResponseParser:
             # Try each strategy in order
             for strategy in self.strategies:
                 if self._should_try_strategy(strategy, context, result):
-                    attempt = strategy.execute(response, context)
+                    attempt = strategy.execute(cleaned_response, context)  # Use cleaned response
                     result.attempts.append(attempt)
                     
                     if attempt.success and attempt.parsed_data:
-                        # Validate the parsed data
-                        validation_result = self.validation_engine.validate_structure(
-                            attempt.parsed_data, parser
-                        )
+                        # Choose validation method based on rubric availability
+                        if rubric:
+                            # Use adaptive validation with rubric
+                            validation_result = self.validation_engine.validate_with_adaptive_schema(
+                                attempt.parsed_data, rubric
+                            )
+                        else:
+                            # Use standard validation with parser
+                            validation_result = self.validation_engine.validate_structure(
+                                attempt.parsed_data, parser
+                            )
                         result.validation_result = validation_result
                         
                         if validation_result.is_valid:
@@ -105,12 +136,20 @@ class EnhancedResponseParser:
             if (result.success_level == SuccessLevel.FAILED and 
                 self.config.enable_fallback_recovery):
                 
-                recovery_result = self._attempt_final_recovery(response, parser)
+                recovery_result = self._attempt_final_recovery(cleaned_response, parser)
                 if recovery_result.success:
                     result.success_level = SuccessLevel.PARTIAL
                     result.partial_content = recovery_result.recovered_data
                     result.recovery_notes.extend(recovery_result.recovery_notes)
                     result.warnings.append(f"Partial recovery successful (confidence: {recovery_result.confidence_score:.2f})")
+                else:
+                    # Final emergency recovery when everything else fails
+                    logger.warning("All parsing and recovery strategies failed - activating emergency recovery")
+                    emergency_data = self._attempt_emergency_recovery(response)
+                    result.success_level = SuccessLevel.PARTIAL
+                    result.partial_content = emergency_data
+                    result.recovery_notes.append("Emergency fallback activated - manual review required")
+                    result.warnings.append("Emergency recovery used - results need manual verification")
             
             # Calculate total processing time
             result.total_processing_time_ms = (time.time() - start_time) * 1000
@@ -235,7 +274,7 @@ class EnhancedResponseParser:
             )
     
     def _log_result_summary(self, result: ParsingResult):
-        """Log a summary of the parsing result."""
+        """Log a summary of the parsing result with detailed error diagnostics."""
         if self.config.log_all_attempts:
             logger.info(f"Parsing completed: {result.success_level.value}")
             logger.info(f"Attempts: {len(result.attempts)}")
@@ -244,11 +283,184 @@ class EnhancedResponseParser:
             if result.successful_strategy:
                 logger.info(f"Successful strategy: {result.successful_strategy.value}")
             
+            # Enhanced error logging for failures
+            if result.success_level == SuccessLevel.FAILED:
+                logger.error(f"All parsing strategies failed")
+                
+                # Log raw response sample for debugging
+                if result.raw_response:
+                    sample_length = min(500, len(result.raw_response))
+                    sample = result.raw_response[:sample_length]
+                    if len(result.raw_response) > sample_length:
+                        sample += "... (truncated)"
+                    logger.error(f"Raw response sample: {repr(sample)}")
+                    logger.error(f"Response length: {len(result.raw_response)} characters")
+                
+                # Log strategy-specific failure analysis
+                for i, attempt in enumerate(result.attempts):
+                    strategy_name = attempt.strategy.value
+                    logger.error(f"Strategy {i+1}/{len(result.attempts)} ({strategy_name}) failed: {attempt.error_message}")
+                    if attempt.error_details:
+                        logger.error(f"  - Error details: {attempt.error_details}")
+                    if attempt.execution_time_ms > 0:
+                        logger.error(f"  - Execution time: {attempt.execution_time_ms:.2f}ms")
+                
+                # Log response format analysis
+                if hasattr(result, 'raw_response') and result.raw_response:
+                    format_info = self._analyze_response_format(result.raw_response)
+                    logger.error(f"Response format analysis: {format_info}")
+            
             if result.errors:
                 logger.warning(f"Errors: {result.errors}")
             
             if result.warnings:
                 logger.info(f"Warnings: {result.warnings}")
+                
+    def _analyze_response_format(self, response: str) -> dict:
+        """Analyze response format for debugging purposes."""
+        analysis = {
+            "starts_with": response[:50] if response else "<empty>",
+            "ends_with": response[-50:] if len(response) > 50 else response,
+            "contains_json_brackets": '{' in response and '}' in response,
+            "contains_code_blocks": '```' in response,
+            "contains_korean": any(ord(char) >= 0xAC00 and ord(char) <= 0xD7A3 for char in response),
+            "line_count": response.count('\n') + 1 if response else 0,
+            "char_count": len(response)
+        }
+        return analysis
+    
+    def _attempt_emergency_recovery(self, response: str) -> Dict[str, Any]:
+        """Emergency recovery when all parsing strategies fail.
+        
+        Returns a basic response structure to prevent complete system failure.
+        This ensures the grading pipeline can continue even when parsing fails.
+        
+        Args:
+            response: Original LLM response that failed to parse
+            
+        Returns:
+            Dict with basic Korean grading structure
+        """
+        logger.warning("Activating emergency recovery - returning basic response structure")
+        
+        # Basic Korean grading structure for emergency fallback
+        emergency_response = {
+            "채점결과": {
+                "주요_채점_요소_1_점수": 0,
+                "합산_점수": 0,
+                "점수_판단_근거": {
+                    "emergency_note": "파싱 실패로 인한 기본값 - 수동 검토 필요"
+                }
+            },
+            "피드백": {
+                "교과_내용_피드백": "시스템 오류로 인해 자동 채점을 완료할 수 없습니다. 수동 검토가 필요합니다.",
+                "의사_응답_여부": False,
+                "의사_응답_설명": "시스템 오류로 판단 불가"
+            }
+        }
+        
+        # Try to extract any score numbers from the response as a last resort
+        import re
+        score_matches = re.findall(r'\b(?:점수|score).*?([0-9]+)', response, re.IGNORECASE)
+        if score_matches:
+            try:
+                # Use the first found score as the main score
+                extracted_score = int(score_matches[0])
+                emergency_response["채점결과"]["주요_채점_요소_1_점수"] = extracted_score
+                emergency_response["채점결과"]["합산_점수"] = extracted_score
+                emergency_response["채점결과"]["점수_판단_근거"]["extracted_score"] = f"응답에서 추출된 점수: {extracted_score}"
+                logger.info(f"Emergency recovery extracted score: {extracted_score}")
+            except ValueError:
+                logger.warning("Could not convert extracted score to integer")
+        
+        # Try to extract any feedback text
+        feedback_patterns = [
+            r'피드백[:s]*([^\n]+)',
+            r'feedback[:s]*([^\n]+)',
+            r'평가[:s]*([^\n]+)',
+        ]
+        
+        for pattern in feedback_patterns:
+            matches = re.findall(pattern, response, re.IGNORECASE | re.UNICODE)
+            if matches:
+                feedback_text = matches[0].strip()
+                if len(feedback_text) > 10:  # Only use if substantial feedback
+                    emergency_response["피드백"]["교과_내용_피드백"] = f"추출된 피드백: {feedback_text}"
+                    logger.info(f"Emergency recovery extracted feedback: {feedback_text[:50]}...")
+                    break
+        
+        return emergency_response
+    
+    def _preprocess_response(self, response: str) -> str:
+        """Clean and normalize response before parsing.
+        
+        This method removes common LLM artifacts and normalizes the response
+        to improve parsing success rates.
+        
+        Args:
+            response: Raw LLM response string
+            
+        Returns:
+            Cleaned and normalized response string
+        """
+        if not response or not response.strip():
+            return response
+        
+        original_length = len(response)
+        cleaned = response
+        
+        # Step 1: Remove leading/trailing LLM artifacts
+        # Remove common leading phrases
+        leading_patterns = [
+            r'^.*?다음은.*?입니다[.:]*\s*',  # "다음은 ... 입니다"
+            r'^.*?Here\s+is.*?:\s*',  # "Here is ..."
+            r'^.*?결과는.*?입니다[.:]*\s*',  # "결과는 ... 입니다"
+            r'^[^{]*?(?=\{)',  # Remove everything before first {
+        ]
+        
+        for pattern in leading_patterns:
+            cleaned = re.sub(pattern, '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        
+        # Step 2: Remove trailing artifacts after JSON
+        # Remove everything after the last }
+        if '}' in cleaned:
+            last_brace = cleaned.rfind('}')
+            if last_brace != -1:
+                cleaned = cleaned[:last_brace + 1]
+        
+        # Step 3: Clean up code block markers
+        cleaned = cleaned.replace('```json', '').replace('```JSON', '')
+        cleaned = cleaned.replace('```', '')
+        cleaned = cleaned.replace('~~~json', '').replace('~~~', '')
+        
+        # Step 4: Fix common JSON formatting issues
+        # Remove trailing commas before closing braces/brackets
+        cleaned = re.sub(r',\s*}', '}', cleaned)
+        cleaned = re.sub(r',\s*]', ']', cleaned)
+        
+        # Fix missing commas between objects (basic heuristic)
+        cleaned = re.sub(r'}\s*{', '},{', cleaned)
+        
+        # Step 5: Normalize whitespace
+        # Replace multiple whitespace with single space (but preserve newlines in strings)
+        cleaned = re.sub(r'[ \t]+', ' ', cleaned)
+        cleaned = re.sub(r'\n\s*\n', '\n', cleaned)
+        
+        # Step 6: Ensure proper JSON structure
+        cleaned = cleaned.strip()
+        
+        # If content doesn't start with { but contains JSON-like content, try to extract it
+        if not cleaned.startswith('{') and '{' in cleaned:
+            first_brace = cleaned.find('{')
+            if first_brace != -1:
+                cleaned = cleaned[first_brace:]
+        
+        # Log preprocessing results if significant changes were made
+        if len(cleaned) != original_length:
+            logger.debug(f"Preprocessing: {original_length} -> {len(cleaned)} chars")
+            logger.debug(f"Removed: {original_length - len(cleaned)} characters")
+        
+        return cleaned
     
     def get_parsing_statistics(self) -> dict:
         """Get statistics about parser performance."""

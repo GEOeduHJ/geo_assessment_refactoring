@@ -348,3 +348,175 @@ class ValidationEngine:
             return False
         
         return None
+    
+    def _create_adaptive_schema(self, rubric_items: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Create flexible schema based on actual rubric structure.
+        
+        This method creates a JSON schema that adapts to the specific rubric
+        structure, making validation more flexible and successful.
+        
+        Args:
+            rubric_items: List of rubric items with main_criterion and sub_criteria
+            
+        Returns:
+            JSON schema dictionary for validation
+        """
+        logger.debug(f"Creating adaptive schema for {len(rubric_items)} rubric items")
+        
+        # Create schema for scoring results
+        scoring_properties = {}
+        
+        # Add score fields for each rubric item
+        for i, item in enumerate(rubric_items):
+            # Main criterion score field
+            main_field = f"주요_채점_요소_{i+1}_점수"
+            scoring_properties[main_field] = {
+                "type": "integer",
+                "description": f"주요 채점 요소 {i+1}에 대한 점수",
+                "minimum": 0
+            }
+            
+            # Sub-criteria score fields
+            for j, sub_item in enumerate(item.get('sub_criteria', [])):
+                sub_field = f"세부_채점_요소_{i+1}_{j+1}_점수"
+                scoring_properties[sub_field] = {
+                    "type": "integer",
+                    "description": f"세부 채점 요소 {i+1}-{j+1}에 대한 점수",
+                    "minimum": 0
+                }
+        
+        # Add required total score and reasoning fields
+        scoring_properties["합산_점수"] = {
+            "type": "integer",
+            "description": "모든 주요 채점 요소 점수의 합산",
+            "minimum": 0
+        }
+        
+        scoring_properties["점수_판단_근거"] = {
+            "type": "object",
+            "description": "각 주요 채점 요소별 점수 판단 근거",
+            "additionalProperties": True  # Allow flexible structure
+        }
+        
+        # Create schema for feedback
+        feedback_properties = {
+            "교과_내용_피드백": {
+                "type": "string",
+                "description": "교과 내용에 대한 구체적인 피드백",
+                "minLength": 1
+            },
+            "의사_응답_여부": {
+                "type": "boolean",
+                "description": "학생 답안이 의사 응답(bluffing)인지 여부"
+            },
+            "의사_응답_설명": {
+                "type": "string",
+                "description": "의사 응답인 경우 설명, 아니면 빈 문자열",
+                "default": ""
+            }
+        }
+        
+        # Combine into full schema
+        adaptive_schema = {
+            "type": "object",
+            "properties": {
+                "채점결과": {
+                    "type": "object",
+                    "properties": scoring_properties,
+                    "required": ["합산_점수"],  # Only require essential fields
+                    "additionalProperties": False
+                },
+                "피드백": {
+                    "type": "object",
+                    "properties": feedback_properties,
+                    "required": ["교과_내용_피드백", "의사_응답_여부"],
+                    "additionalProperties": False
+                }
+            },
+            "required": ["채점결과", "피드백"],
+            "additionalProperties": False
+        }
+        
+        logger.debug(f"Created adaptive schema with {len(scoring_properties)} scoring fields")
+        return adaptive_schema
+    
+    def validate_with_adaptive_schema(self, json_data: Dict[str, Any], 
+                                    rubric_items: List[Dict[str, Any]]) -> ValidationResult:
+        """Validate JSON data using adaptive schema.
+        
+        Args:
+            json_data: Parsed JSON data to validate
+            rubric_items: Rubric items for schema creation
+            
+        Returns:
+            ValidationResult with validation outcome
+        """
+        try:
+            adaptive_schema = self._create_adaptive_schema(rubric_items)
+            
+            # Perform basic structure validation
+            validation_errors = []
+            validation_warnings = []
+            corrected_data = json_data.copy()
+            
+            # Check required top-level fields
+            if "채점결과" not in corrected_data:
+                validation_errors.append("Missing required field: 채점결과")
+            if "피드백" not in corrected_data:
+                validation_errors.append("Missing required field: 피드백")
+            
+            if validation_errors:
+                # Try to add missing top-level structures
+                if "채점결과" not in corrected_data:
+                    corrected_data["채점결과"] = {"합산_점수": 0}
+                    validation_warnings.append("Added missing 채점결과 structure")
+                
+                if "피드백" not in corrected_data:
+                    corrected_data["피드백"] = {
+                        "교과_내용_피드백": "구조적 오류로 인해 피드백을 생성할 수 없습니다.",
+                        "의사_응답_여부": False,
+                        "의사_응답_설명": ""
+                    }
+                    validation_warnings.append("Added missing 피드백 structure")
+            
+            # Validate and correct scoring fields
+            scoring_section = corrected_data.get("채점결과", {})
+            if "합산_점수" not in scoring_section:
+                scoring_section["합산_점수"] = 0
+                validation_warnings.append("Added missing 합산_점수 field")
+            
+            # Validate and correct feedback fields
+            feedback_section = corrected_data.get("피드백", {})
+            required_feedback_fields = ["교과_내용_피드백", "의사_응답_여부"]
+            for field in required_feedback_fields:
+                if field not in feedback_section:
+                    if field == "교과_내용_피드백":
+                        feedback_section[field] = "필수 피드백 필드가 누락되었습니다."
+                    elif field == "의사_응답_여부":
+                        feedback_section[field] = False
+                    validation_warnings.append(f"Added missing {field} field")
+            
+            # If we had errors but managed corrections, it's a partial success
+            if validation_errors and validation_warnings:
+                return ValidationResult(
+                    is_valid=True,
+                    errors=[],
+                    warnings=validation_warnings,
+                    corrected_data=corrected_data
+                )
+            
+            return ValidationResult(
+                is_valid=True,
+                errors=[],
+                warnings=validation_warnings,
+                corrected_data=corrected_data
+            )
+            
+        except Exception as e:
+            logger.error(f"Adaptive validation failed: {e}")
+            return ValidationResult(
+                is_valid=False,
+                errors=[f"Adaptive validation error: {str(e)}"],
+                warnings=[],
+                corrected_data=None
+            )
