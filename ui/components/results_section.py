@@ -1,6 +1,7 @@
 """
 Results section component for the RAG grading platform.
 Handles display of grading results, detailed views, and Excel export.
+Now includes Arrow-compatible display methods for Streamlit Cloud deployment.
 """
 import streamlit as st
 import pandas as pd
@@ -8,6 +9,7 @@ from typing import List, Dict, Any, Optional
 from ui.state_manager import StateManager
 from services.grading_service import GradingService
 from services.export_service import ExportService
+from utils.type_conversion import StreamlitCompatibilityMiddleware
 
 
 class ResultsSectionComponent:
@@ -70,11 +72,14 @@ class ResultsSectionComponent:
         with col4:
             st.metric("평균 점수", f"{summary['average_score']:.1f}점")
         
-        # Format and display results table
+        # Format and display results table with Arrow-compatible safe display
         display_df = self.export_service.format_results_for_display(graded_results, question_type)
         
         if not display_df.empty:
-            st.dataframe(display_df)
+            # Use safe display method to handle Arrow conversion issues
+            StreamlitCompatibilityMiddleware.safe_streamlit_display(
+                display_df, "채점 결과 요약"
+            )
         else:
             st.warning("표시할 결과가 없습니다.")
     

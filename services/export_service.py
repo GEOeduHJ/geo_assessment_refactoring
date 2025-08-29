@@ -1,10 +1,12 @@
 """
 Export service for handling results formatting and Excel export.
 Formats grading results for display and export to Excel.
+Now includes Arrow-compatible type conversion for Streamlit Cloud deployment.
 """
 import pandas as pd
 import io
 from typing import List, Dict, Any
+from utils.type_conversion import DataFrameTypeEnforcer, GradingTimeFormatter
 
 
 class ExportService:
@@ -13,14 +15,14 @@ class ExportService:
     @staticmethod
     def format_results_for_display(graded_results: List[Dict[str, Any]], question_type: str) -> pd.DataFrame:
         """
-        Format grading results for display in Streamlit.
+        Format grading results for display in Streamlit with Arrow-compatible types.
         
         Args:
             graded_results: List of grading result dictionaries
             question_type: Type of question ("서술형" or "백지도")
             
         Returns:
-            pandas.DataFrame: Formatted results for display
+            pandas.DataFrame: Formatted results for display with Arrow-compatible types
         """
         if not graded_results:
             return pd.DataFrame()
@@ -35,26 +37,24 @@ class ExportService:
         results_df = pd.DataFrame(graded_results)
         existing_columns = [col for col in display_columns if col in results_df.columns]
         
-        # Create display DataFrame with string conversion for complex objects
+        # Create display DataFrame with robust type handling
         display_df = results_df[existing_columns].copy()
         
-        # Convert complex objects to strings for display
-        for col in ["채점결과", "피드백"]:
-            if col in display_df.columns:
-                display_df[col] = display_df[col].astype(str)
+        # Apply comprehensive type enforcement for Arrow compatibility
+        display_df = DataFrameTypeEnforcer.enforce_string_types(display_df)
         
         return display_df.fillna("")
     
     @staticmethod
     def format_results_for_export(graded_results: List[Dict[str, Any]]) -> pd.DataFrame:
         """
-        Format grading results for Excel export.
+        Format grading results for Excel export with explicit type conversion.
         
         Args:
             graded_results: List of grading result dictionaries
             
         Returns:
-            pandas.DataFrame: Formatted results for Excel export
+            pandas.DataFrame: Formatted results for Excel export with proper types
         """
         if not graded_results:
             return pd.DataFrame()
@@ -63,34 +63,36 @@ class ExportService:
         
         for result in graded_results:
             new_row = {
-                "이름": result.get("이름"),
-                "답안": result.get("답안") if "답안" in result else result.get("인식된_텍스트"),
-                "참고문서": result.get("참고문서"),
-                "채점_소요_시간": result.get("채점_소요_시간"),
-                "오류": result.get("오류")
+                "이름": str(result.get("이름", "")),
+                "답안": str(result.get("답안") if "답안" in result else result.get("인식된_텍스트", "")),
+                "참고문서": str(result.get("참고문서", "")),
+                "채점_소요_시간": GradingTimeFormatter.format_grading_time(
+                    result.get("채점_소요_시간")
+                ),
+                "오류": str(result.get("오류", ""))
             }
             
-            # Flatten 채점결과 (grading results) into separate columns
+            # Flatten 채점결과 (grading results) into separate columns with string conversion
             if isinstance(result.get("채점결과"), dict):
                 for key, value in result["채점결과"].items():
-                    new_row[f"채점결과_{key}"] = value
+                    new_row[f"채점결과_{key}"] = str(value) if value is not None else ""
             else:
-                new_row["채점결과"] = result.get("채점결과")
+                new_row["채점결과"] = str(result.get("채점결과", ""))
             
-            # Flatten 피드백 (feedback) into separate columns
+            # Flatten 피드백 (feedback) into separate columns with string conversion
             if isinstance(result.get("피드백"), dict):
                 for key, value in result["피드백"].items():
-                    new_row[f"피드백_{key}"] = value
+                    new_row[f"피드백_{key}"] = str(value) if value is not None else ""
             else:
-                new_row["피드백"] = result.get("피드백")
+                new_row["피드백"] = str(result.get("피드백", ""))
             
-            # Add 점수_판단_근거 (scoring rationale) if available
+            # Add 점수_판단_근거 (scoring rationale) with string conversion
             if "점수_판단_근거" in result:
                 if isinstance(result["점수_판단_근거"], dict):
                     for key, value in result["점수_판단_근거"].items():
-                        new_row[f"점수_판단_근거_{key}"] = value
+                        new_row[f"점수_판단_근거_{key}"] = str(value) if value is not None else ""
                 else:
-                    new_row["점수_판단_근거"] = result["점수_판단_근거"]
+                    new_row["점수_판단_근거"] = str(result["점수_판단_근거"])
             
             final_excel_rows.append(new_row)
         
